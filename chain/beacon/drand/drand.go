@@ -102,7 +102,6 @@ func (db *DrandBeacon) Entry(ctx context.Context, round uint64) <-chan beacon.Re
 	if round != 0 {
 		be := db.getCachedValue(round)
 		if be != nil {
-			log.Warn("CACHE HIT")
 			out <- beacon.Response{Entry: *be}
 			close(out)
 			return out
