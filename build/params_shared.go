@@ -120,9 +120,4 @@ const VerifSigCacheSize = 32000
 const BlockMessageLimit = 512
 const BlockGasLimit = 100_000_000
 
-var DrandCoeffs = []string{
-	"82c279cce744450e68de98ee08f9698a01dd38f8e3be3c53f2b840fb9d09ad62a0b6b87981e179e1b14bc9a2d284c985",
-	"82d51308ad346c686f81b8094551597d7b963295cbf313401a93df9baf52d5ae98a87745bee70839a4d6e65c342bd15b",
-	"94eebfd53f4ba6a3b8304236400a12e73885e5a781509a5c8d41d2e8b476923d8ea6052649b3c17282f596217f96c5de",
-	"8dc4231e42b4edf39e86ef1579401692480647918275da767d3e558c520d6375ad953530610fd27daf110187877a65d0",
-}
+var DrandGroup = `{"nodes":[{"public":{"address":"dev2.rpc.drand.sh:4444","key":"kSlQYhQQxqXtHE3MQLYprjJEi0zZeS3HN2ZI/ym2fN2SGlQPQM4gyWDL6h3ynsv+","tls":true}},{"public":{"address":"dev1.rpc.drand.sh:4444","key":"s15BGGuNOv2gqi34SqPGyTckWPMWunR+ttqLLluoHYdymEQ2G4yQdfZa7DDuSJC4","tls":true},"index":1}],"threshold":2,"period":30,"genesis_time":1589461830,"genesis_seed":"jxbwEFJQtR805B+4RdCWaLLj2wCNrLPC1GHwuyNJuFQ=","dist_key":["iP228i/L5nG/kb779yPhWeWTT3hRaLQ3wDQkzeY2HP9fXTA0OQJg8hBDiUbyHYZ9","o4eqEPj2y+8GTx2bAnLidpstbFjjdLWl33womAULluUJvuahbdYyl+1hYP4D+fR0"]}`
