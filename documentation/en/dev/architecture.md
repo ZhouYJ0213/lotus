@@ -6,6 +6,8 @@ We start from the [Join Testnet](https://docs.lotu.sh/en+join-testnet) documenta
 
 We assume the use of an IDE that can follow Go symbolic reference or any other static analysis tool.
 
+FIXME: Add Github links to every `github.com` listed here (this should be able to be done programmatically, every relative path is to Lotus and the rest are absolute paths).
+
 # CLI, API
 
 Explain how do we communicate with the node, both in terms of the CLI and the programmatic way (to create our own tools).
@@ -53,9 +55,90 @@ Because we rely heavily on reflection for this part of the code the call chain i
 
 This means that when we are tracking the logic of a CLI command we will eventually find this bifurcation and study the code in server-side implementation in `node/impl/full` (mostly in the `common/` and `full/` directories). If we understand this architecture going directly to that part of the code abstracts away the JSON-RPC client/server logic and we can think that the CLI is actually running the node's logic.
 
+FIXME: Explain that "*the* node" is actually an API structure like `impl.FullNodeAPI` with the different API subcomponents like `full.SyncAPI`. We won't see a *single* node structure, each API (full node, minder, etc) will gather the necessary subcomponents it needs to service its calls.
+
 # Node build
 
-In `cmd/lotus/daemon.go` the node is created through [dependency injection](https://godoc.org/go.uber.org/fx), most notably the `Online()` and `Repo()` functional options (`node/builder.go`).
+When we start the daemon command (`cmd/lotus/daemon.go`) the node is created through [dependency injection](https://godoc.org/go.uber.org/fx) (again relying on reflection that might make some of the references hard to follow). The node sets up all of the subsystems it needs to run, e.g., the repository, the network connection, services like chain sync, etc. Each of those is order through a successive calls to the `node.Override` function (see `fx` linked above for more details). The structure of the call indicates first the type of component it will set up (many defined in `node/modules/dtypes/`) and the function that will provide it. The dependency is implicit in the argument of the provider function, for example, the `modules.ChainStore()` function that provide the `ChainStore` structure (as indicated by one of the `Override()` calls) takes as one of its parameters the `ChainBlockstore` type, which will be then one of its dependencies. For the node to be built successfully the `ChainBlockstore` will need to be provided before `ChainStore`, and this is indeed explicitly stated in another `Override()` call that sets the provider of that type the `ChainBlockstore()` function. (Most of these references can be followed through the IDE.)
+
+## Repo
+
+The repo is the directory where all the node information is stored. The repo is entirely defined by it making it easy to port to another location. This one-to-one relation means sometimes we will speak (or define structures in the code) of the node as just the repo it is associated to, instead of the daemon process that runs from that repo, both associations are correct and just depend on the context.
+
+Only one daemon can run per node/repo at a time, if we try to start a second one (e.g., maybe because we have one running in the background without noticing it) we will get a `repo is already locked` error. This is the way for a process to signal it is running a node associated with that repo, a `repo.lock` will be created in it and seized by that process:
+
+```sh
+lsof ~/.lotus/repo.lock
+# COMMAND   PID
+# lotus   52356
+```
+
+FIXME: Replace the `repo is already locked` error with the actual explanation so we don't need to also translate error to reality here as well: https://github.com/filecoin-project/lotus/issues/1829.
+
+The `node.Repo()` function (`node/builder.go`) contains most of the dependencies (specified as `Override()` calls) needed to properly set up the node's repo. We list the most salient ones here (defined in `node/modules/storage.go`).
+
+`LockedRepo()`: a common pattern in the DI model is to not only provide actual structures the node will incorporate in itself but least any type of dependency in terms of "things that need to be done" before the node start, this is the case of this function that doesn't create and initialize any new structure but rather registers a `OnStop` [hook](https://godoc.org/go.uber.org/fx/internal/lifecycle#Hook) that will close the locked repository associated to it:
+
+```Go
+type LockedRepo interface {
+	// Close closes repo and removes lock.
+	Close() error
+
+```
+
+`Datastore` and `ChainBlockstore`: all data related to the node state is saved in the repo's `Datastore` an IPFS interface defined in `github.com/ipfs/go-datastore/datastore.go`. (See `(*fsLockedRepo).Datastore()` in `node/repo/fsrepo.go` for how Lotus creates it from a [Badger DB](https://github.com/dgraph-io/badger).) At the core every piece of data is a key-value pair in the `datastore` directory of the repo, but there are several abstractions we lay on top of it that appear through the code depending on *how* do we access it, but it is important to remember that the *where* is always the same.
+
+FIXME: Maybe mention the `Batching` interface as the developer will stumble upon it before reaching the `Datastore` one.
+
+The first abstraction is the `Blockstore` interface (`github.com/ipfs/go-ipfs-blockstore/blockstore.go`) which structures the key-value pair into the CID format for the key and the `Block` interface (`github.com/ipfs/go-block-format/blocks.go`) for the value, which is just a raw string of bytes addressed by its hashed (which is included in the CID key/identifier). `ChainBlockstore` will create a `Blockstore` in the repo under the `/blocks` namespace (basically every key stored there will have that prefix so it does not collide with other stores that use the same underlying repo).
+
+FIXME: Link to IPFS documentation about DAG, CID, and related.
+
+FIXME: Should we already do the IPFS block vs Filecoin block explanation here? Might be too distracting, but we should assume that the reader is already aware of the *block* term in the context of Filecoin so the confusion is likely to arise, maybe just link to another section explaining this.
+
+Similarly, `modules.Datastore()` creates a `dtypes.MetadataDS` (alias for the basic `Datastore` interface) to store metadata under the `/metadata`. (FIXME: Explain *what* is metadata in contrast with the block store, namely we store the pointer to the heaviest chain, we might just link to that unwritten section here later.)
+
+FIXME: Explain the key store related calls.
+
+At the end of the `Repo()` function we see two mutually exclusive configuration calls based on the `RepoType` (`node/repo/fsrepo.go`).
+```Go
+			ApplyIf(isType(repo.FullNode), ConfigFullNode(c)),
+			ApplyIf(isType(repo.StorageMiner), ConfigStorageMiner(c)),
+```
+As we said, the repo fully identified the node so a repo type is also a *node* type, in this case a full node or a storage miner. (FIXME: What is the difference between the two, does *full* imply miner?) In this case the `daemon` command will create a `FullNode`, this is specified in the command logic itself in `main.DaemonCmd()`, the `FsRepo` created (and passed to `node.Repo()`) will be initiated with that type (see `(*FsRepo).Init(t RepoType)`).
+
+## Online
+
+The `node.Online()` configuration function (`node/builder.go`) sets up more than its name implies, the general theme though is that all of the components initialized here depend on the node connecting with the Filecoin network, being "online", through the libp2p stack (`libp2p()` discussed later). We list in this section the most relevant ones corresponding to the full node type (that is, included in the `ApplyIf(isType(repo.FullNode),` call).
+
+FIXME: We might want to split this into logical subsections.
+
+```
+Sort in order of relevance, *not* dependence.
+
+Override(new(*chain.Syncer), modules.NewSyncer),
+
+Override(new(*store.ChainStore), modules.ChainStore),
+Override(new(dtypes.ChainExchange), modules.ChainExchange),
+Override(new(dtypes.ChainBlockService), modules.ChainBlockservice),
+Override(RunBlockSyncKey, modules.RunBlockSync),
+
+Override(HandleIncomingMessagesKey, modules.HandleIncomingMessages),
+Override(HandleIncomingBlocksKey, modules.HandleIncomingBlocks),
+
+Override(new(dtypes.AfterGenesisSet), modules.SetGenesis),
+
+Override(new(dtypes.NetworkName), modules.NetworkName),
+Override(new(*hello.Service), hello.NewHelloService),
+Override(new(*blocksync.BlockSyncService), blocksync.NewBlockSyncService),
+Override(RunHelloKey, modules.RunHello),
+```
+
+## libp2p
+
+FIXME: This should be a brief section with the relevant links to `libp2p` documentation and how do we use its services.
+
+
 
 The node type, like the `FullNode` we are running to sync, is actually the  `RepoType` (`node/repo/fsrepo.go`). In general the node forms its identities from the different subsystems that would be useful to identify, like the type for the repo, the ID from the libp2p peer network, etc.
 
