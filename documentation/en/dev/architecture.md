@@ -4,11 +4,56 @@ Not a complete reference, just introductory material to the key concepts and com
 
 We start from the [Join Testnet](https://docs.lotu.sh/en+join-testnet) documentation. When we run `lotus daemon` the node starts and connects to (bootstrap) peers to download (sync) the chain.
 
+We assume the use of an IDE that can follow Go symbolic reference or any other static analysis tool.
+
 # CLI, API
 
-Basic description of files layout.
+Explain how do we communicate with the node, both in terms of the CLI and the programmatic way (to create our own tools).
 
-Explain the different node interfaces, particularly `FullNode` in `api/api_full.go`.
+## Client/server architecture
+
+In terms of the Filecoin network the node is a peer on distributed hierarchy, but in terms of how we interact with the node we have client/server architecture.
+
+The node itself was initiated with the `daemon` command, it already started syncing to the chain by default. Along with that service it also started a [JSON-RPC](https://en.wikipedia.org/wiki/JSON-RPC) server to allow a client to interact with it. (FIXME: Check if this client is local or can be remote, link to external documentation of connection API.)
+
+We can connect to this server through the Lotus CLI. Virtually any other command other than `daemon` will run a client that will connect (by default) to the address specified in the `api` file in the repo associated with the node (by default in `~/.lotus`), e.g.,
+
+```sh
+cat  ~/.lotus/api && echo
+# /ip4/127.0.0.1/tcp/1234/http
+
+# With `lotus daemon` running in another terminal.
+nc -v -z 127.0.0.1 1234 
+# Connection to 127.0.0.1 1234 port [tcp/*] succeeded!
+```
+
+FIXME: We should be able to run everything in the same terminal, starting and stopping the daemon to make the queries, see https://github.com/filecoin-project/lotus/issues/1827 and https://github.com/filecoin-project/lotus/issues/1828:
+
+```
+lotus daemon &
+lotus <wait-for-connection-command>
+lotus log set-level error # Or a env.var in the daemon command.
+nc -v -z 127.0.0.1 1234 
+lotus <stop-daemon-command>
+```
+
+FIXME: Link to more in-depth documentation of the CLI architecture, maybe some IPFS documentation (since they share some common logic).
+
+## Node API
+
+The JSON-RPC server exposes the node API, the `FullNode` interface (defined in `api/api_full.go`). When we issue a command like `lotus sync status` to query the the progress of the node sync process we don't access the node's internals, those are decoupled in the separate daemon process, we call the `SyncState` function (of the `FullNode` API interface) through the RPC client started by our own command (see `NewFullNodeRPC` in `api/client/client.go` for more details).
+
+FIXME: Link to (and create) documentation about API fulfillment.
+
+Because we rely heavily on reflection for this part of the code the call chain is not easily visible by just following the references through the symbolic analysis of the IDE. If we start by the `lotus sync` command definition (in `cli/sync.go`), we eventually end up in the method interface `SyncState`, and when we look for its implementation we will find two functions:
+
+* `(*SyncAPI).SyncState()` (in `node/impl/full/sync.go`): this is the actual implementation of the API function that shows what the node (here acting as the RPC server) will execute when it receives the RPC request issued from the CLI acting as the client.
+
+* `(*FullNodeStruct).SyncState()`: this is an "empty placeholder" structure that will get later connected to the JSON-RPC client logic (see `NewMergeClient` in `lib/jsonrpc/client.go`, which is called by `NewFullNodeRPC`). (FIXME: check if this is accurate). The CLI (JSON-RPC client) will actually execute this function which will connect to the server and send the corresponding JSON request that will trigger the call of `(*SyncAPI).SyncState()` with the node implementation.
+
+This means that when we are tracking the logic of a CLI command we will eventually find this bifurcation and study the code in server-side implementation in `node/impl/full` (mostly in the `common/` and `full/` directories). If we understand this architecture going directly to that part of the code abstracts away the JSON-RPC client/server logic and we can think that the CLI is actually running the node's logic.
+
+# Node build
 
 In `cmd/lotus/daemon.go` the node is created through [dependency injection](https://godoc.org/go.uber.org/fx), most notably the `Online()` and `Repo()` functional options (`node/builder.go`).
 
