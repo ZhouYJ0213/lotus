@@ -6,7 +6,7 @@ We start from the [Join Testnet](https://docs.lotu.sh/en+join-testnet) documenta
 
 We assume the use of an IDE that can follow Go symbolic reference or any other static analysis tool.
 
-FIXME: Add Github links to every `github.com` listed here (this should be able to be done programmatically, every relative path is to Lotus and the rest are absolute paths).
+FIXME: Add Github links to every `github.com` listed here (this should be able to be done programmatically, every relative path is to Lotus and the rest are absolute paths). Alternatively, we can probably collapse most of the links with their corresponding functions and structures.
 
 # CLI, API
 
@@ -92,7 +92,7 @@ FIXME: Maybe mention the `Batching` interface as the developer will stumble upon
 
 The first abstraction is the `Blockstore` interface (`github.com/ipfs/go-ipfs-blockstore/blockstore.go`) which structures the key-value pair into the CID format for the key and the `Block` interface (`github.com/ipfs/go-block-format/blocks.go`) for the value, which is just a raw string of bytes addressed by its hashed (which is included in the CID key/identifier). `ChainBlockstore` will create a `Blockstore` in the repo under the `/blocks` namespace (basically every key stored there will have that prefix so it does not collide with other stores that use the same underlying repo).
 
-FIXME: Link to IPFS documentation about DAG, CID, and related.
+FIXME: Link to IPFS documentation about DAG, CID, and related, especially we need a diagram that shows how do we wrap each datastore inside the next layer (datastore, batching, block store, gc, etc).
 
 FIXME: Should we already do the IPFS block vs Filecoin block explanation here? Might be too distracting, but we should assume that the reader is already aware of the *block* term in the context of Filecoin so the confusion is likely to arise, maybe just link to another section explaining this.
 
@@ -107,50 +107,35 @@ At the end of the `Repo()` function we see two mutually exclusive configuration 
 ```
 As we said, the repo fully identified the node so a repo type is also a *node* type, in this case a full node or a storage miner. (FIXME: What is the difference between the two, does *full* imply miner?) In this case the `daemon` command will create a `FullNode`, this is specified in the command logic itself in `main.DaemonCmd()`, the `FsRepo` created (and passed to `node.Repo()`) will be initiated with that type (see `(*FsRepo).Init(t RepoType)`).
 
+FIXME: Do we need to mention or link IPLD here? Where do we use IPLD stores?
+
+	> In general we see the IPLD store everywhere, what do we need to know about IPLD in particular, can we just assume everything we save are raw key-value blocks?
+
 ## Online
 
 The `node.Online()` configuration function (`node/builder.go`) sets up more than its name implies, the general theme though is that all of the components initialized here depend on the node connecting with the Filecoin network, being "online", through the libp2p stack (`libp2p()` discussed later). We list in this section the most relevant ones corresponding to the full node type (that is, included in the `ApplyIf(isType(repo.FullNode),` call).
 
-FIXME: We might want to split this into logical subsections.
+`modules.ChainStore()`: creates the `store.ChainStore` structure (`chain/store/store.go`) that wraps the previous stores instantiated in `Repo()`, it is the main point of entry for the node to all chain-related data (FIXME: this is incorrect, we sometimes access its underlying block store directly, and probably shouldn't). Most important, it holds the pointer (`heaviest`) to the current head (see more details in the sync section later).
 
-```
-Sort in order of relevance, *not* dependence.
+`ChainExchange()` and `ChainBlockservice()` establish a BitSwap connection (see libp2p() section below) to exchange chain information in the form of `blocks.Block`s stored in the repo. (See sync section for more details, the Filecoin blocks and messages are backed by this interconnected raw IPFS blocks that together form the different structures that define the state of the current/heaviest chain.)
 
-Override(new(*chain.Syncer), modules.NewSyncer),
+`HandleIncomingBlocks()` and `HandleIncomingMessages()`: rather than create other structures they start the services in charge of processing new Filecoin blocks and messages from the network (see `<undefined>` for more information about the topics the node is subscribed to, FIXME: should that be part of the libp2p section or should we expand on gossipsub separately?).
 
-Override(new(*store.ChainStore), modules.ChainStore),
-Override(new(dtypes.ChainExchange), modules.ChainExchange),
-Override(new(dtypes.ChainBlockService), modules.ChainBlockservice),
-Override(RunBlockSyncKey, modules.RunBlockSync),
+`RunHello()`: starts the services to both send (`(*Service).SayHello()`) and receive (`(*Service).HandleStream`, `node/hello/hello.go`) `hello` messages with which nodes that establish a new connection with each other exchange chain-related information (namely their genesis block and their chain head, heavies tipset). (FIXME: Similar to above, should we expand on this in libp2p?)
 
-Override(HandleIncomingMessagesKey, modules.HandleIncomingMessages),
-Override(HandleIncomingBlocksKey, modules.HandleIncomingBlocks),
+`NewSyncer()`: creates the structure and starts the services related to the chain sync process (discussed in detailed in this document).
 
-Override(new(dtypes.AfterGenesisSet), modules.SetGenesis),
+Although not necessarily listed in the dependency order here, we can establish those relations by looking at the parameters each function needs, and most importantly, by understanding the architecture of the node and how the different components relate to each other, the main objective of this document. For example, the sync mechanism depends on the node being able to exchange different IPFS blocks in the network to request the "missing pieces" to reconstruct the chain, this is reflected by `NewSyncer()` having a `blocksync.BlockSync` parameter, and this in turn depending on the above mentioned `ChainBlockservice()` and `ChainExchange()`. Similarly, the chain exchange service depends on the chain store to save and retrieve chain data,  this is reflected by `ChainExchange()` having `ChainGCBlockstore` as a parameter, which is just a wrapper around the `ChainBlockstore` with garbage collection support.
 
-Override(new(dtypes.NetworkName), modules.NetworkName),
-Override(new(*hello.Service), hello.NewHelloService),
-Override(new(*blocksync.BlockSyncService), blocksync.NewBlockSyncService),
-Override(RunHelloKey, modules.RunHello),
-```
+This block store is the same store underlying the chain store which in turn is an indirect dependency (through the `StateManager`) of the `NewSyncer()`. (FIXME: This last line is flaky, we need to resolve the hierarchy better, we sometimes refer to the chain store and sometimes its underlying block store.)
+
+FIXME: We need a diagram to visualize all the different components just mentioned otherwise it is too hard to follow. We probably need to skip some of the connections mentioned.
 
 ## libp2p
 
 FIXME: This should be a brief section with the relevant links to `libp2p` documentation and how do we use its services.
 
-
-
-The node type, like the `FullNode` we are running to sync, is actually the  `RepoType` (`node/repo/fsrepo.go`). In general the node forms its identities from the different subsystems that would be useful to identify, like the type for the repo, the ID from the libp2p peer network, etc.
-
-Discuss the different stores, point to an IPFS document with the basic definitions of blocks, DAG, CID, and how do we stack stores together wrapping one another. We basically have a single store, in the repository, with different interfaces. The `ChainBlockstore` is the API of the store (with the `/blocks` prefix, a reference to Filecoin blocks or IPFS ones?) where we save all chain related information we fetch in the sync (maybe just mention `ChainStore`). In general we see the IPLD store everywhere, what do we need to know about IPLD in particular, can we just assume everything we save are raw key-value blocks?
-
-In `Repo()`, the private key comes from `libp2p`, which means that our key should be thought of in the network model. The Filecoin key that identifies us is the key we use to communicate in the network.
-
-The `Online()` option has basically all of the important configurations. Skipping `libp2p()` (network related, should be discussed briefly), in the context of the sync, we have `HandleIncomingBlocks()` registered to process network messages (clarify terminology of `libp2p` message which contains anything, and the Filecoin block which contains messages which contains instructions to the VM, the first contains the second that contains the third). We should explain the route of verification starting on `sub.HandleIncomingBlocks()` (already done in the security doc, import or reference it here).
-
-We are ignoring the `HandleIncomingMessages()` route that seems more related with miner activity (although it's registered in the full node), does a non-miner care about them?.
-
-We're skipping the `StorageMiner` section entirely in `Online()`. It is confusing because the *full* in `FullNode` gives the impression of encompassing *all* functionality of the protocol, is `StorageMiner` a subset of it, or are they mutually exclusive with a massive if in `Online()` to just share the `libp2p()` call?.
+<<<<<<<<<<<<<<< SECOND PASS
 
 # Sync
 
