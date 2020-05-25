@@ -6,7 +6,9 @@ We start from the [Join Testnet](https://docs.lotu.sh/en+join-testnet) documenta
 
 We assume the use of an IDE that can follow Go symbolic reference or any other static analysis tool.
 
-FIXME: Add Github links to every `github.com` listed here (this should be able to be done programmatically, every relative path is to Lotus and the rest are absolute paths). Alternatively, we can probably collapse most of the links with their corresponding functions and structures.
+FIXME: This still needs more work to achieve a coherent and (mostly) self-contained narrative that someone without prior knowledge of the Lotus code can read from beginning to end.
+
+FIXME: Add Github links to every `github.com` listed here (this should be able to be done programmatically, every relative path is to Lotus and the rest are absolute paths). Alternatively, we can probably collapse most of the links with their corresponding functions and structures (might also help reducing the package qualifiers used sometimes).
 
 # CLI, API
 
@@ -111,65 +113,53 @@ FIXME: Do we need to mention or link IPLD here? Where do we use IPLD stores?
 
 	> In general we see the IPLD store everywhere, what do we need to know about IPLD in particular, can we just assume everything we save are raw key-value blocks?
 
-## Online
+### Filecoin blocks vs IPFS blocks
 
-The `node.Online()` configuration function (`node/builder.go`) sets up more than its name implies, the general theme though is that all of the components initialized here depend on the node connecting with the Filecoin network, being "online", through the libp2p stack (`libp2p()` discussed later). We list in this section the most relevant ones corresponding to the full node type (that is, included in the `ApplyIf(isType(repo.FullNode),` call).
+The term *block* has different meanings depending on the context, many times both meanings coexist at once in the code and it is important to distinguish them. (FIXME: link to IPFS blocks and related throughout this explanation). In terms of the lower IPFS layer, in charge of storing and retrieving data, both present at the repo or accessible through the network (e.g., through the BitSwap protocol discussed later), a block is a string of raw bytes identified by its hashed, embedded and fully qualified in a CID identifier. IPFS blocks are the "building blocks" of almost any other piece of (chain) data described in the Filecoin protocol.
 
-`modules.ChainStore()`: creates the `store.ChainStore` structure (`chain/store/store.go`) that wraps the previous stores instantiated in `Repo()`, it is the main point of entry for the node to all chain-related data (FIXME: this is incorrect, we sometimes access its underlying block store directly, and probably shouldn't). Most important, it holds the pointer (`heaviest`) to the current head (see more details in the sync section later).
+In contrast, in the higher Filecoin (application) layer, a block is roughly (FIXME: link to spec definition, if we have any) a set of zero or more messages grouped together by a single miner which is itself grouped with other blocks (from other miners) in the same round to form a tipset. The Filecoin blockchain is a series of "chained" tipsets, each referencing its parent by its header's *CID*, that is, as seen as a single IPFS block, this is where both layers interact.
 
-`ChainExchange()` and `ChainBlockservice()` establish a BitSwap connection (see libp2p() section below) to exchange chain information in the form of `blocks.Block`s stored in the repo. (See sync section for more details, the Filecoin blocks and messages are backed by this interconnected raw IPFS blocks that together form the different structures that define the state of the current/heaviest chain.)
-
-`HandleIncomingBlocks()` and `HandleIncomingMessages()`: rather than create other structures they start the services in charge of processing new Filecoin blocks and messages from the network (see `<undefined>` for more information about the topics the node is subscribed to, FIXME: should that be part of the libp2p section or should we expand on gossipsub separately?).
-
-`RunHello()`: starts the services to both send (`(*Service).SayHello()`) and receive (`(*Service).HandleStream`, `node/hello/hello.go`) `hello` messages with which nodes that establish a new connection with each other exchange chain-related information (namely their genesis block and their chain head, heavies tipset). (FIXME: Similar to above, should we expand on this in libp2p?)
-
-`NewSyncer()`: creates the structure and starts the services related to the chain sync process (discussed in detailed in this document).
-
-Although not necessarily listed in the dependency order here, we can establish those relations by looking at the parameters each function needs, and most importantly, by understanding the architecture of the node and how the different components relate to each other, the main objective of this document. For example, the sync mechanism depends on the node being able to exchange different IPFS blocks in the network to request the "missing pieces" to reconstruct the chain, this is reflected by `NewSyncer()` having a `blocksync.BlockSync` parameter, and this in turn depending on the above mentioned `ChainBlockservice()` and `ChainExchange()`. Similarly, the chain exchange service depends on the chain store to save and retrieve chain data,  this is reflected by `ChainExchange()` having `ChainGCBlockstore` as a parameter, which is just a wrapper around the `ChainBlockstore` with garbage collection support.
-
-This block store is the same store underlying the chain store which in turn is an indirect dependency (through the `StateManager`) of the `NewSyncer()`. (FIXME: This last line is flaky, we need to resolve the hierarchy better, we sometimes refer to the chain store and sometimes its underlying block store.)
-
-FIXME: We need a diagram to visualize all the different components just mentioned otherwise it is too hard to follow. We probably need to skip some of the connections mentioned.
-
-## libp2p
-
-FIXME: This should be a brief section with the relevant links to `libp2p` documentation and how do we use its services.
-
-<<<<<<<<<<<<<<< SECOND PASS
-
-# Sync
-
-We follow the `NewSyncer` path in `Online()` to the `chain/` directory. `chain.NewSyncer()` in `chain/sync.go` creates the `Syncer` structure (with some attributes that will be explained as needed) which is started together with the application (see `fx.Hook`). When the `Syncer` is created it also creates in its turn a `SyncManager`, what is the domain separation between the two? The `Syncer` starts `SyncManager` which starts the different goroutines (`(*SyncManager).syncWorker()`) that actually process the incoming blocks, with the `doSync` function which is normally the `(*Syncer).Sync()` (going back to the previous structure now).
-
-We receive blocks through the gossipsub topic (explain in a separate network section) but we later fetch the blocks needed through a different protocol in `(*BlockSyncService).HandleStream()` (is this correct? expand on graphsync).
-
-In `(*SyncManager).Start()` we ignore the scheduling and focus just on the worker, `syncWorker()`, which will wait from the scheduler (`syncTargets`) new blocks (encapsulated in `TipSet`s) and call `doSync` (`(*Syncer).Sync`, set in `NewSyncer`) on them.
-
-## Filecoin blocks
-
-Normally we prefix them with the Filecoin qualifier as block is normally used in lower layers like IPFS to refer to a raw piece of binary data (normally associated with the stores).
-
-At this point the reader should be familiarized with the IPFS model of storing and retrieving data by CIDs in a distributed manner. We normally don't transfer data itself in the model but their CIDs identifiers with which the node can fetch the actual data.
-
-In `sub.HandleIncomingBlocks` (`chain/sub/incoming.go`, not to be confused with the one in the DI list), ignoring the verification steps, what arrives is the message with the CID of a block we should sync to (`chain/types/blockmsg.go`):
+Using now the full Go package qualifiers to avoid any ambiguity, the Filecoin block, `github.com/filecoin-project/lotus/chain/types.FullBlock` defined as,
 
 ```Go
-type BlockMsg struct {
-	Header        *BlockHeader
-	BlsMessages   []cid.Cid
-	SecpkMessages []cid.Cid
-}
-```
+package types
 
-The only actual data received is the header of the block, with the messages represented by their CIDs. Once we fetch the messages (through the normal IPFS channels, unrelated to the sync "topics", see later) we form the actual Filecoin block (`chain/types/fullblock.go`):
+import "github.com/ipfs/go-cid"
 
-```Go
 type FullBlock struct {
 	Header        *BlockHeader
 	BlsMessages   []*Message
 	SecpkMessages []*SignedMessage
 }
+
+func (fb *FullBlock) Cid() cid.Cid {
+	return fb.Header.Cid()
+}
 ```
+
+has, besides the Filecoin messages, a header with protocol related information (e.g., its `Height`) which is (like virtually any other piece of data in the Filecoin protocol) stored, retrieved and shared as a IPFS block with its corresponding CID,
+
+```Go
+func (b *BlockHeader) Cid() cid.Cid {
+	sb, err := b.ToStorageBlock()
+
+	return sb.Cid()
+}
+
+func (b *BlockHeader) ToStorageBlock() (block.Block, error) {
+	data, err := b.Serialize()
+
+	return github.com/ipfs/go-block-format.block.NewBlockWithCid(data)
+}
+```
+
+These edited extracts from the `BlockHeader` show how it's treated as an IPFS block, `github.com/ipfs/go-block-format.block.BasicBlock`, to be both stored and referenced by its block storage CID.
+
+These duality permeates the code (and the Filecoin spec for that matter) but it is usually clear within the context to which block we are referring to. Normally the unqualified *block* is reserved for the Filecoin block and we won't usually refer to the IPFS one but only implicitly through the concept of its CID. With enough understanding of both stack's architecture the two definitions can coexist without much confusion as we will abstract away the IPFS layer and just use the CID identifier as an ID that we now its unique for two sequences of different *raw* byte strings.
+
+(FIXME: We use to do this presentation when talking about `gossipsub` topics and incoming blocks, and had to deal with, besides the block ambiguity, a similar confusion with the *message* term, used in libp2p to name anything that comes through the network, needing to present the extremely confusing hierarchy of a libp2p message containing a Filecoin block, identified by a IPFS block CID, containing Filecoin messages.)
+
+FIXME: Move the following tipset definition to sync or wherever is most needed, to avoid making this more confusing.
 
 Messages from the same round are collected into a block set (`chain/store/fts.go`):
 
@@ -185,17 +175,80 @@ The "tipset" denomination might be a bit misleading as it doesn't refer *only* t
 
 FIXME: How are the tipsets connected? Explain the role of the CIDs and reference an IPFS document about hash chaining in general, how we cannot modify one without modifying all in the chain (Merkle tree).
 
-## Back to sync
+## Online
 
-In `(*Syncer).collectChain` (which does more than just fetching), called from `(*Syncer).Sync`, we will have a (partial) tipset with the new block received from the network. We will first call `collectHeaders()` to fetch all the block sets that connect it to our current chain (handling potential fork cases).
+The `node.Online()` configuration function (`node/builder.go`) sets up more than its name implies, the general theme though is that all of the components initialized here depend on the node connecting with the Filecoin network, being "online", through the libp2p stack (`libp2p()` discussed later). We list in this section the most relevant ones corresponding to the full node type (that is, included in the `ApplyIf(isType(repo.FullNode),` call).
 
-Assuming a "fast forward" case where the received block connects directly to our current tipset (is that the *head* of the chain?) we will call `syncMessagesAndCheckState` to execute the messages inside the new blocks and update our state up to the new head.
+`modules.ChainStore()`: creates the `store.ChainStore` structure (`chain/store/store.go`) that wraps the previous stores instantiated in `Repo()`, it is the main point of entry for the node to all chain-related data (FIXME: this is incorrect, we sometimes access its underlying block store directly, and probably shouldn't). Most important, it holds the pointer (`heaviest`) to the current head (see more details in the sync section later).
 
-The validations functions called thereafter (mainly `(*Syncer).ValidateBlock()`) will have as a side effect the execution of the messages which will generate the new state, see `(*StateManager).computeTipSetState()` accessed through the `Syncer` structure, and in turn `ApplyBlocks` and `(*VM).ApplyMessage`.
+`ChainExchange()` and `ChainBlockservice()` establish a BitSwap connection (see libp2p() section below) to exchange chain information in the form of `blocks.Block`s stored in the repo. (See sync section for more details, the Filecoin blocks and messages are backed by this interconnected raw IPFS blocks that together form the different structures that define the state of the current/heaviest chain.)
 
-## What happens when we sync to a new head
+`HandleIncomingBlocks()` and `HandleIncomingMessages()`: rather than create other structures they start the services in charge of processing new Filecoin blocks and messages from the network (see `<undefined>` for more information about the topics the node is subscribed to, FIXME: should that be part of the libp2p section or should we expand on gossipsub separately?).
 
-Expand on how do we arrive to `(*ChainStore).takeHeaviestTipSet()`.
+`RunHello()`: starts the services to both send (`(*Service).SayHello()`) and receive (`(*Service).HandleStream()`, `node/hello/hello.go`) `hello` messages with which nodes that establish a new connection with each other exchange chain-related information (namely their genesis block and their chain head, heavies tipset). (FIXME: Similar to above, should we expand on this in libp2p?)
+
+`NewSyncer()`: creates the structure and starts the services related to the chain sync process (discussed in detailed in this document).
+
+Although not necessarily listed in the dependency order here, we can establish those relations by looking at the parameters each function needs, and most importantly, by understanding the architecture of the node and how the different components relate to each other, the main objective of this document. For example, the sync mechanism depends on the node being able to exchange different IPFS blocks in the network to request the "missing pieces" to reconstruct the chain, this is reflected by `NewSyncer()` having a `blocksync.BlockSync` parameter, and this in turn depending on the above mentioned `ChainBlockservice()` and `ChainExchange()`. Similarly, the chain exchange service depends on the chain store to save and retrieve chain data,  this is reflected by `ChainExchange()` having `ChainGCBlockstore` as a parameter, which is just a wrapper around the `ChainBlockstore` with garbage collection support.
+
+This block store is the same store underlying the chain store which in turn is an indirect dependency (through the `StateManager`) of the `NewSyncer()`. (FIXME: This last line is flaky, we need to resolve the hierarchy better, we sometimes refer to the chain store and sometimes its underlying block store.)
+
+FIXME: We need a diagram to visualize all the different components just mentioned otherwise it is too hard to follow. We probably need to skip some of the connections mentioned.
+
+## libp2p
+
+FIXME: This should be a brief section with the relevant links to `libp2p` documentation and how do we use its services.
+
+# Sync
+
+We follow now the sync process happening internally in the node when starting it with the `daemon` command. This process starts automatically as one of the dependencies, `NewSyncer()` call in `Online()`, and the `lotus sync status` (or similarly the `sync wait`) CLI (RPC client) commands just queries ("reads") this process but does not start, stop or modify it in any way.
+
+Roughly the process is as follows: each time we connect to a new (unseen) node we exchange the head of our chain (heaviest tipset) with it through the `hello` protocol, if this tipset is heavier than ours we try to sync to it, meaning we look for the blocks that connect that potential new head to our current chain. It might be a natural continuation of what we have, "fast forward" (maybe because we haven't caught up to the newest blocks), or it might be a fork from our current head. In any case, once we fetch the blocks necessary to connect to it we execute all the messages contained in them leading up to head and verify if it has a valid state (see VM and state sections for more details).
+
+Alternatively to this path, we also receive new blocks through the `blocks` `gossipsub` topic which will also be checked to be potential new heads to our current chain. (FIXME: We either explain gossipsub in libp2p subsection above or discuss it in its own section later, either way refer to that). For simplicity in this analysis we follow the `hello` code path.
+
+It is important to note that the sync service runs throughout the entire lifetime of the node, it cannot be stopped, as we are always in a "perpetual syncing state" since we can never be sure that we have *the* heaviest tipset in the entire network, there is always the possibility of a new incoming tipset to be "better" (heavier) than our current head. Even when the `lotus sync wait` command reports we are synced, it just means the timestamp of our current head is close to the current time (see `SyncWait()` in `cli/sync.go`), that we are "synced up to the present", but it does not guarantee having the heaviest tipset possible (a decentralized model does not have such a concept to begin with because there is no central authority to keep track of that, we just depend on the weight of a block based on an agreed upon set of rules from the protocol).
+
+We already saw the `modules.RunHello()` dependency setup in the `node.Online()` configuration function, it starts the `(*Service).HandleStream()` service to process incoming `hello` messages (`HelloMessage`, `node/hello/hello.go`) and extracts the `HeaviestTipSet` from it, calling `(*Syncer).InformNewHead()` to notify the syncer process about a new potential head of the chain, that is, a new *valid* tipset with more weight than our current heaviest one. A few notes of interest before moving on, the tipset in its entirety is not actually sent in the message but instead its `TipSetKey` (string of CIDs of the blocks that conform that tipset). The `hello` service fetches the actual tipset by using the `Syncer`'s `BlockSync` service `(*BlockSync).GetFullTipSet()`. What does this means in terms of dependencies? That the `hello.Service` control structure needs access to the `Syncer` which in turn uses its `BlockSync`, this is reflected in the dependency construction, the `RunHello()` provider has a `hello.Service` parameter, this in turn has the `Syncer` as a parameter (`NewHelloService`), and the `Syncer` (as we have already seen) needs a `BlockSync` (`NewSyncer()`).
+
+Once the `Syncer` is informed of a new potential head it adds it to the queue to process it. Without going into the full details of `Syncer` internals, we should mention the it has a `SyncManager` structure in charge of coordinating the multiple syncing process (as we might be checking more than one potential heaviest tipset at a time, this is specially true during the first sync of the node where we start from the initial genesis block). As said, the `Syncer` runs throughout the life cycle of the node and this is reflected on the `OnStart`/`OnStop` application hooks in `NewSyncer` that start and stop the sync process in coordination with the node application. When the `SyncManager` starts it runs many sync worker routines and a central scheduler to coordinate them:
+
+```Go
+	go sm.syncScheduler()
+	for i := 0; i < syncWorkerCount; i++ {
+		go sm.syncWorker(i)
+	}
+```
+
+The `syncWorkerCount` number (normally 3) is reflected in the output of the `lotus sync status` command that will show a separate status (`SyncerState`, `chain/syncstate.go`) for each of the sync workers. When a new tipset is informed, depending on the current state of the sync, the scheduler will assign a free worker to process it or will queue it (see `scheduleIncoming` in `chain/sync_manager.go`). (FIXME: There is much more to it but that should be in the code's comments, that currently doesn't have, but eventually we should point there.)
+
+Each `syncWorker` once it receives a new head calls the `doSync` handler to sync to it, usually corresponding to the `(*Syncer).Sync()` function (set up in the `NewSyncer()` configuration.)
+
+## Syncing to a new head
+
+Once we receive the potential new head (with more weight than our current one), do some initial validation checks and forward it to the sync scheduler, it is queued until a worker can process it and call the `(*Syncer).Sync(maybeHead *types.TipSet)` on it, at that point is where the actual sync process itself really begins. Throughout it we will see many `SyncerState` updates that reflect its current state (see `SyncStateStage`). These states, each associated with one sync worker, are passed around through the `context.Context` in the call chain (`extractSyncState()`).
+
+The two most important stages of the sync are:
+
+* `StageHeaders`: collect all the blocks (through the `BlockSync`) needed to connect our chain with the new head. The *header* synecdoche, used throughout the code, refers to the actual Filecoin blocks, which are identified by just through their headers (`BlockHeader`) until we actually need the messages associated to it (converting it to a `FullBlock`).
+
+* `StageMessages`: once we have all the blocks connecting our chain to the new head we can update the chain state up to the head by sequentially applying all the messages associated with the collected blocks. That is the *only* way to verify if a head is valid, we need to evaluate its state, and for that we need to execute all the messages necessary to arrive to it (see VM section later for a full discussion about state).
+
+The two functions associated with these phases are `(*Syncer).collectHeaders()` and `syncMessagesAndCheckState()` respectively. Most of the state execution and validation of the second one happens inside `(*Syncer).ValidateBlock()` (a few calls down the line, as we need first to split a tipset into its constituent blocks and analyze one at a time).
+
+## Setting the new head in the chain
+
+If all validations pass we will now set that head as our heaviest tipset and, since all the collection and validation already happened as a side effect of the sync process, we will already have the chain in the synced state to reflect it.
+
+In `Sync()`, after `collectChain()` is done (this function does more than its name implies) we will have synced to the new head, the sync state which will be reflected in the CLI command is `StageSyncComplete`. The next function called there is `(*ChainStore).PutTipSet()`, eventually leading to `takeHeaviestTipSet()` that will update the `heaviest` pointer in the `ChainStore` to put to the new head (tipset) received.
+
+It is important to note at this point that similar to the IPFS architecture of addressing by content and not by location/address (FIXME: check and link to IPFS docs) the "actual" chain stored in the node repo is *relative* to which CID we look for. We always have stored a series of Filecoin blocks pointing to other blocks, each a potential chain in itself by following its parent's reference, and its parent's parent, and so on up to the genesis block. (FIXME: We need a diagram here, one of the Filecoin blog entries might have something similar to what we are describing here.) It only depends on *where* (location) do we start to look for. The *only* address/location reference we hold of the chain, an *absolute* reference, is the `heaviest` pointer. This is reflected by the fact that we don't store it in the `Blockstore` by a *fixed* CID that reflects its contents, as this will change each time we sync to a new head (FIXME: link to the immutability IPFS doc that I need to write).
+
+This is one of the few items we store in `Datastore` by key, location, allowing its contents to change on every sync. This is reflected in the `(*ChainStore) writeHead()` function (called by `takeHeaviestTipSet()` above) where we reference the pointer by the explicit `chainHeadKey` address (the string `"head"`, not a hash embedded in a CID), and similarly in `(*ChainStore).Load()` when we start the node and create the `ChainStore`. Compare this to a Filecoin block or message which are immutable, stored in the `Blockstore` by CID, once created they never change.
+
+(FIXME: The absolute/relative distinction is dangerous and should be fully qualified, the CID could be considered the absolute reference as its content will never change, and the string key the relative one, as it depends on which *time* do we use that reference. The qualification might be time in this example.)
+
+<<<<<<<<<<<<<<< SECOND PASS
 
 # Genesis block
 
@@ -231,7 +284,9 @@ Gossip sub spec and some introduction.
 
 # VM
 
-Do we have a detailed intro to the VM in the spec?
+The validations functions called thereafter (mainly `(*Syncer).ValidateBlock()`) will have as a side effect the execution of the messages which will generate the new state, see `(*StateManager).computeTipSetState()` accessed through the `Syncer` structure, and in turn `ApplyBlocks` and `(*VM).ApplyMessage`.
+
+Do we have a detailed intro to the VM in the spec? Not at the moment.
 
 The most important fact about the state is that it is just a collection of data (see actors later) stored under a root CID. Changing a state is just changing the value of that CID pointer (`StateTree.root`, `chain/state/statetree.go`). There is a different hierarchy of "pointers" here. Which is the top one? `ChainStore.heaviest`? (actually a pointer tipset)
 
