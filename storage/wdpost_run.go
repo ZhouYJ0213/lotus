@@ -15,6 +15,7 @@ import (
 	"go.opencensus.io/trace"
 	"golang.org/x/xerrors"
 
+	"github.com/filecoin-project/lotus/build"
 	"github.com/filecoin-project/lotus/chain/actors"
 	"github.com/filecoin-project/lotus/chain/types"
 )
@@ -197,6 +198,49 @@ func (s *WindowPoStScheduler) checkFaults(ctx context.Context, ssi []abi.SectorN
 	return nil, nil
 }
 
+// the input sectors must match with the miner actor
+func (s *WindowPoStScheduler) getNeedProveSectors(ctx context.Context, deadlineSectors *abi.BitField, ts *types.TipSet) (*abi.BitField, error) {
+	faults, err := s.api.StateMinerFaults(ctx, s.actor, ts.Key())
+	if err != nil {
+		return nil, xerrors.Errorf("getting on-chain faults: %w", err)
+	}
+
+	declaredFaults, err := bitfield.IntersectBitField(deadlineSectors, faults)
+	if err != nil {
+		return nil, xerrors.Errorf("failed to intersect proof sectors with faults: %w", err)
+	}
+
+	recoveries, err := s.api.StateMinerRecoveries(ctx, s.actor, ts.Key())
+	if err != nil {
+		return nil, xerrors.Errorf("getting on-chain recoveries: %w", err)
+	}
+
+	expectedRecoveries, err := bitfield.IntersectBitField(declaredFaults, recoveries)
+	if err != nil {
+		return nil, xerrors.Errorf("failed to intersect recoveries with faults: %w", err)
+	}
+
+	expectedFaults, err := bitfield.SubtractBitField(declaredFaults, expectedRecoveries)
+	if err != nil {
+		return nil, xerrors.Errorf("failed to subtract recoveries from faults: %w", err)
+	}
+
+	nonFaults, err := bitfield.SubtractBitField(deadlineSectors, expectedFaults)
+	if err != nil {
+		return nil, xerrors.Errorf("failed to diff bitfields: %w", err)
+	}
+
+	empty, err := nonFaults.IsEmpty()
+	if err != nil {
+		return nil, xerrors.Errorf("failed to check if bitfield was empty: %w", err)
+	}
+	if empty {
+		return nil, xerrors.Errorf("no non-faulty sectors in partitions: %w", err)
+	}
+
+	return nonFaults, nil
+}
+
 func (s *WindowPoStScheduler) runPost(ctx context.Context, di miner.DeadlineInfo, ts *types.TipSet) (*miner.SubmitWindowedPoStParams, error) {
 	ctx, span := trace.StartSpan(ctx, "storage.runPost")
 	defer span.End()
@@ -252,7 +296,12 @@ func (s *WindowPoStScheduler) runPost(ctx context.Context, di miner.DeadlineInfo
 		partitions[i] = firstPartition + uint64(i)
 	}
 
-	ssi, err := s.sortedSectorInfo(ctx, deadlines.Due[di.Index], ts)
+	nps, err := s.getNeedProveSectors(ctx, deadlines.Due[di.Index], ts)
+	if err != nil {
+		return nil, xerrors.Errorf("get need prove sectors: %w", err)
+	}
+
+	ssi, err := s.sortedSectorInfo(ctx, nps, ts)
 	if err != nil {
 		return nil, xerrors.Errorf("getting sorted sector info: %w", err)
 	}
@@ -336,12 +385,13 @@ func (s *WindowPoStScheduler) submitPost(ctx context.Context, proof *miner.Submi
 	}
 
 	msg := &types.Message{
-		To:       s.actor,
-		From:     s.worker,
-		Method:   builtin.MethodsMiner.SubmitWindowedPoSt,
-		Params:   enc,
-		Value:    types.NewInt(1000), // currently hard-coded late fee in actor, returned if not late
-		GasLimit: 10000000,           // i dont know help
+		To:     s.actor,
+		From:   s.worker,
+		Method: builtin.MethodsMiner.SubmitWindowedPoSt,
+		Params: enc,
+		Value:  types.NewInt(1000), // currently hard-coded late fee in actor, returned if not late
+		// TODO: Gaslimit needs to be calculated accurately. Before that, use the largest Gaslimit
+		GasLimit: build.BlockGasLimit,
 		GasPrice: types.NewInt(1),
 	}
 
